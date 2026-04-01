@@ -1,7 +1,8 @@
+// Analytics Page Component
 import React from 'react';
 
-const Analytics = () => {
-    return <div>Analytics Page</div>;
-};
+function Analytics() {
+  return <div>Analytics Page</div>;
+}
 
 export default Analytics;
