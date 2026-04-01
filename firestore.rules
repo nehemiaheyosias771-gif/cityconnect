@@ -1,0 +1,115 @@
+// firestore.rules — Firestore Security Rules
+// Deploy with: firebase deploy --only firestore:rules
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper functions ────────────────────────────────────
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function hasRole(role) {
+      return isSignedIn() && request.auth.token.role == role;
+    }
+
+    function isAdminOrAuthority() {
+      return hasRole('admin') || hasRole('authority');
+    }
+
+    function isValidIssue() {
+      let data = request.resource.data;
+      return data.keys().hasAll(['title', 'category', 'location', 'lat', 'lng', 'status'])
+        && data.title is string && data.title.size() >= 5 && data.title.size() <= 120
+        && data.category in ['water', 'waste', 'road', 'power', 'infrastructure']
+        && data.status == 'open'    // New issues must be open
+        && data.lat is number && data.lng is number;
+    }
+
+    // ── Users ───────────────────────────────────────────────
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdminOrAuthority();
+      allow create: if isOwner(userId);
+      allow update: if isOwner(userId) && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'uid', 'createdAt']);
+      allow delete: if isOwner(userId) || hasRole('admin');
+    }
+
+    // ── Issues ──────────────────────────────────────────────
+    match /issues/{issueId} {
+      // Anyone signed in can read issues
+      allow read: if isSignedIn();
+
+      // Verified users can create issues
+      allow create: if isSignedIn()
+        && request.auth.token.email_verified == true
+        && isValidIssue()
+        && request.resource.data.reportedBy == request.auth.uid;
+
+      // Only authority/admin can update status
+      allow update: if isSignedIn() && (
+        // Voter updating votes + voterIds only
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['votes', 'voterIds', 'updatedAt']))
+        ||
+        // Authority/admin updating status
+        (isAdminOrAuthority() && request.resource.data.diff(resource.data).affectedKeys().hasAny(['status']))
+      );
+
+      allow delete: if hasRole('admin');
+
+      // Comments subcollection
+      match /comments/{commentId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn()
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 500
+          && request.resource.data.userId == request.auth.uid;
+        allow delete: if isOwner(resource.data.userId) || hasRole('admin');
+      }
+    }
+
+    // ── Community posts ─────────────────────────────────────
+    match /community_posts/{postId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.title is string
+        && request.resource.data.title.size() >= 5;
+      allow update: if isOwner(resource.data.userId);
+      allow delete: if isOwner(resource.data.userId) || hasRole('admin');
+
+      // Connections subcollection
+      match /connections/{connectorId} {
+        allow read: if isOwner(get(/databases/$(database)/documents/community_posts/$(postId)).data.userId) || hasRole('admin');
+        allow create: if isSignedIn() && connectorId == request.auth.uid;
+      }
+    }
+
+    // ── Chat messages ───────────────────────────────────────
+    match /chat_messages/{room}/messages/{msgId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && room in ['general', 'bole', 'kirkos', 'yeka', 'alerts']
+        && request.resource.data.text is string
+        && request.resource.data.text.size() > 0
+        && request.resource.data.text.size() <= 500
+        && request.resource.data.userId == request.auth.uid;
+      allow delete: if hasRole('admin');
+    }
+
+    // ── Security events (admin only) ────────────────────────
+    match /security_events/{eventId} {
+      allow read, write: if hasRole('admin');
+    }
+
+    // ── Deny everything else ────────────────────────────────
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
